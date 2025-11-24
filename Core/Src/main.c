@@ -44,8 +44,10 @@
 
 /* USER CODE END PM */
 
-/* Private variables ---------------------------------------------------------*/
-
+/* Private variables 
+---------------------------------------------------------*/
+extern TIM_HandleTypeDef htim3;
+extern TIM_HandleTypeDef htim4;
 /* USER CODE BEGIN PV */
 
 // 定义全局状态变量
@@ -168,6 +170,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM3_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
   // 初始化
@@ -250,39 +253,58 @@ void SystemClock_Config(void)
 // --- 1. 电机初始化 ---
 void Motor_Init(void)
 {
+  // **【新增 TB6612FNG STBY 激活代码】**
+  // 假设你在 CubeMX 中将 PB9 配置为 STBY 引脚（请根据实际配置修改）
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET); // 将STBY设置为高电平激活驱动器
+
   // 启动 TIM3 的 4 个通道 PWM
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);  // 左轮前 (PA6)
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);  // 左轮后 (PA7)
+  // TIM_CHANNEL_3 (PB0) 已损坏，不启动
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);  // 右轮后 (PB1)
+
+  // 【新增】启动 TIM4 (右轮前进使用 PB8)
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);  // 右轮前 (PB8)
 }
 
-// --- 2. 设置电机速度 (DRV8833 逻辑) ---
+// --- 2. 设置电机速度 (支持跨定时器操作) ---
+
 // 辅助函数：设置单个电机的PWM
-static void Set_Single_Motor(uint32_t ch_fwd, uint32_t ch_rev, int16_t speed)
+// 相比原函数，增加了对不同定时器句柄（htim_fwd, htim_rev）的支持
+static void Set_Single_Motor(
+    TIM_HandleTypeDef *htim_fwd, uint32_t ch_fwd, // 前进通道的定时器和通道号
+    TIM_HandleTypeDef *htim_rev, uint32_t ch_rev, // 后退通道的定时器和通道号
+    int16_t speed)
 {
+  // 限制速度范围
   if (speed > PWM_MAX_SPEED) speed = PWM_MAX_SPEED;
   if (speed < -PWM_MAX_SPEED) speed = -PWM_MAX_SPEED;
 
   if (speed > 0) {
-    __HAL_TIM_SET_COMPARE(&htim3, ch_fwd, speed);
-    __HAL_TIM_SET_COMPARE(&htim3, ch_rev, 0);
+    // 前进
+    __HAL_TIM_SET_COMPARE(htim_fwd, ch_fwd, speed);
+    __HAL_TIM_SET_COMPARE(htim_rev, ch_rev, 0);
   } else if (speed < 0) {
-    __HAL_TIM_SET_COMPARE(&htim3, ch_fwd, 0);
-    __HAL_TIM_SET_COMPARE(&htim3, ch_rev, abs(speed));
+    // 后退
+    __HAL_TIM_SET_COMPARE(htim_fwd, ch_fwd, 0);
+    __HAL_TIM_SET_COMPARE(htim_rev, ch_rev, abs(speed));
   } else {
-    __HAL_TIM_SET_COMPARE(&htim3, ch_fwd, 0);
-    __HAL_TIM_SET_COMPARE(&htim3, ch_rev, 0);
+    // 停止
+    __HAL_TIM_SET_COMPARE(htim_fwd, ch_fwd, 0);
+    __HAL_TIM_SET_COMPARE(htim_rev, ch_rev, 0);
   }
 }
 
 void Set_Motor_Speed(int16_t left_speed, int16_t right_speed)
 {
-  // 左电机：TIM3 CH1(PA6) / CH2(PA7)
-  Set_Single_Motor(TIM_CHANNEL_1, TIM_CHANNEL_2, left_speed);
+  // 左电机 (保持不变): 都在 TIM3 上
+  // 前进: TIM3_CH1 (PA6), 后退: TIM3_CH2 (PA7)
+  Set_Single_Motor(&htim3, TIM_CHANNEL_1, &htim3, TIM_CHANNEL_2, left_speed);
   
-  // 右电机：TIM3 CH3(PB0) / CH4(PB1)
-  Set_Single_Motor(TIM_CHANNEL_3, TIM_CHANNEL_4, right_speed);
+  // 右电机 (【已修改】): 前进使用 TIM4，后退使用 TIM3
+  // 前进: TIM4_CH3 (PB8) <--- 新引脚，使用 htim4
+  // 后退: TIM3_CH4 (PB1) <--- 旧引脚，使用 htim3
+  Set_Single_Motor(&htim4, TIM_CHANNEL_3, &htim3, TIM_CHANNEL_4, right_speed);
 }
 
 // --- 3. 读取前端传感器 (A0-A4) ---
