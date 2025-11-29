@@ -1,31 +1,31 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2025 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "tim.h"
 #include "gpio.h"
+#include "tim.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
-#include <stdlib.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 /* USER CODE END Includes */
 
@@ -44,30 +44,33 @@
 
 /* USER CODE END PM */
 
-/* Private variables ---------------------------------------------------------*/
-
+/* Private variables
+---------------------------------------------------------*/
+extern TIM_HandleTypeDef htim3; // 定时器3句柄，用于控制左电机和右电机后退
+extern TIM_HandleTypeDef htim4; // 定时器4句柄，用于控制右电机前进
 /* USER CODE BEGIN PV */
 
-// 定义全局状态变量
-#define BASE_SPEED 400
-#define PWM_MAX_SPEED 1000
+// ========== 速度常量定义 ==========
+#define BASE_SPEED 400     // 基础速度：小车正常行驶时的速度值
+#define PWM_MAX_SPEED 1000 // PWM最大速度：定时器计数器的最大值（占空比100%）
+ 
+// ========== PID控制器参数 ==========
+// PID是一种自动控制算法，用于让小车准确跟随黑线
+float Kp = 15.0f; // 比例系数P：偏差越 大，修正力度越大（主要控制参数，需要调试）
+float Ki = 0.0f;  // 积分系数I：消除长期累积偏差（循迹不需要，保持为0）
+float Kd = 50.0f; // 微分系数D：根据偏差变化趋势进行预测，抑制震荡
+                  // 可以让小车过弯更平滑，减少左右摇摆
 
-// --- PID 参数 ---
-float Kp = 35.0f;   // #TODO: 比例系数 (需要调试，建议从20-50开始)
-float Ki = 0.0f;    // 积分系数 (循迹通常不需要，设为0)
-float Kd = 20.0f;   // 微分系数 (用于抑制由于惯性产生的震荡)
+int16_t last_error = 0; // 记录上一次的偏差值，用于计算D（微分项）
 
-int16_t last_error = 0; // 上一次的偏差值，用于计算D
-// ----------------
-
-// 定义小车状态
+// ========== 小车运行状态定义 ==========
 typedef enum {
-  STATE_FORWARD_TRACKING,
-  STATE_REVERSE_TRACKING,
-  STATE_STOPPED
+  STATE_FORWARD_TRACKING, // 前进循迹：使用前端传感器，小车向前跟线
+  STATE_REVERSE_TRACKING, // 后退循迹：使用后端传感器，小车向后跟线
+  STATE_STOPPED           // 停止状态：小车静止不动
 } CarState_t;
 
-CarState_t g_car_state = STATE_STOPPED; // 初始状态为停止
+CarState_t g_car_state = STATE_STOPPED; // 当前小车状态，初始为停止
 
 /* USER CODE END PV */
 
@@ -99,7 +102,8 @@ uint8_t Read_Rear_Sensors(void);
 
 /*
  * @brief  根据传感器状态计算循迹偏差值
- * @param  sensor_value: 5位传感器数据 (来自Read_Front_Sensors或Read_Rear_Sensors)
+ * @param  sensor_value: 5位传感器数据
+ * (来自Read_Front_Sensors或Read_Rear_Sensors)
  * @retval int16_t: 偏差值。
  * 0  表示完全居中 (例如 0b00100)
  * 负值 表示偏左 (例如 0b10000 或 0b01000)
@@ -139,11 +143,10 @@ void Set_Motor_Speed(int16_t left_speed, int16_t right_speed);
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
-int main(void)
-{
+ * @brief  The application entry point.
+ * @retval int
+ */
+int main(void) {
 
   /* USER CODE BEGIN 1 */
 
@@ -151,7 +154,8 @@ int main(void)
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick.
+   */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -168,12 +172,13 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_TIM3_Init();
+  MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
 
-  // 初始化
-  Motor_Init();
-  PID_Init();
-  g_car_state = STATE_FORWARD_TRACKING; // 假设开始时是前进
+  // ========== 系统初始化 ==========
+  Motor_Init(); 
+  PID_Init(); 
+  g_car_state = STATE_FORWARD_TRACKING; // 设置小车初始状态为前进循迹模式
 
   /* USER CODE END 2 */
 
@@ -184,230 +189,361 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-    HAL_Delay(1000);
-    // --- 电机测试代码 ---
-    // 前进 (速度 500/1000)
-    Set_Motor_Speed(500, 500);
-    HAL_Delay(2000); // 持续2秒
 
-    // 停止
-    Set_Motor_Speed(0, 0);
-    HAL_Delay(1000); // 停1秒
+    uint8_t front_sensors = Read_Front_Sensors(); // 读取传感器
+    int16_t deviation = Calculate_Deviation(front_sensors); // 计算偏差
 
-    // 后退 (速度 -500/1000)
-    Set_Motor_Speed(-500, -500);
-    HAL_Delay(2000); // 持续2秒
+    // --- 循迹控制逻辑 ---
+    if (deviation == 999 /* 丢失目标特殊值 */) {
+        // 可以保持上次速度，或者执行搜线算法
+    }
+    
+    int16_t correction = PID_Calculate(deviation); // 计算修正量
+    
+    int16_t left_speed, right_speed;
 
-    // 停止
-    Set_Motor_Speed(0, 0);
-    HAL_Delay(1000); // 停1秒
+    // 左轮速度 = 基础速度 + 修正量 (如果偏差为正，修正量为正，左轮加速)
+    left_speed = BASE_SPEED + correction;
+    
+    // 右轮速度 = 基础速度 - 修正量 (如果偏差为正，右轮减速)
+    right_speed = BASE_SPEED - correction;
+
+    Set_Motor_Speed(left_speed, right_speed); // 驱动电机
+    
+    // 控制周期延迟，防止 CPU 负载过高 (10ms 约 100Hz 控制频率)
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
-void SystemClock_Config(void)
-{
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+ * @brief 系统时钟配置
+ * @note  配置STM32F103的系统时钟为72MHz（最高频率）
+ *        使用外部8MHz晶振，通过PLL倍频9倍得到72MHz
+ * @retval None
+ */
+void SystemClock_Config(void) {
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0}; // 时钟源配置结构体
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0}; // 系统时钟配置结构体
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  /** 配置时钟源（振荡器） */
+  RCC_OscInitStruct.OscillatorType =
+      RCC_OSCILLATORTYPE_HSE;              // 使用外部高速时钟（HSE）
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON; // 打开HSE（8MHz外部晶振）
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1; // HSE不分频
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;     // 内部时钟也打开（作为备用）
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON; // 启用PLL（锁相环倍频）
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE; // PLL时钟源选择HSE
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9; // PLL倍频9倍：8MHz × 9 = 72MHz
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) // 应用配置
   {
-    Error_Handler();
+    Error_Handler(); // 配置失败，进入错误处理
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  /** 配置系统时钟和总线时钟 */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource =
+      RCC_SYSCLKSOURCE_PLLCLK; // 系统时钟源选择PLL（72MHz）
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1; // AHB总线不分频：72MHz
+  RCC_ClkInitStruct.APB1CLKDivider =
+      RCC_HCLK_DIV2; // APB1总线2分频：36MHz（最大36MHz）
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1; // APB2总线不分频：72MHz
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) !=
+      HAL_OK) // 应用配置，Flash延迟2个周期
   {
-    Error_Handler();
+    Error_Handler(); // 配置失败，进入错误处理
   }
 }
 
 /* USER CODE BEGIN 4 */
 
-// --- 1. 电机初始化 ---
-void Motor_Init(void)
-{
-  // **【新增 TB6612FNG STBY 激活代码】**
-  // 假设你在 CubeMX 中将 PB9 配置为 STBY 引脚（请根据实际配置修改）
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET); // 将STBY设置为高电平激活驱动器
+// ========================================
+// 函数名：Motor_Init
+// 功能：初始化电机驱动系统
+// 说明：1. 激活TB6612FNG电机驱动芯片（通过STBY引脚）
+//       2. 启动PWM输出（控制电机转速）
+// ========================================
+void Motor_Init(void) {
+  // **激活TB6612FNG驱动芯片**
+  // TB6612FNG有一个STBY（待机）引脚，必须设置为高电平才能工作
+  // 低电平时芯片处于省电模式，所有输出都被禁用
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9,
+                    GPIO_PIN_SET); // PB9设为高电平，激活驱动器
 
-  // 启动 TIM3 的 4 个通道 PWM
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_3);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);
+  // **启动PWM信号输出**
+  // PWM（脉宽调制）用于控制电机速度：占空比越大，电机转得越快
+
+  // 左电机控制（使用TIM3的两个通道）
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); // 左轮前进通道 (PA6)
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2); // 左轮后退通道 (PA7)
+
+  // 右电机控制（前进和后退使用不同定时器，因为PB0损坏了）
+  // TIM_CHANNEL_3 (PB0) 已损坏，不启动 - 原本用于右轮前进
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4); // 右轮后退通道 (PB1) - 使用TIM3
+  HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3); // 右轮前进通道 (PB8) - 使用TIM4代替
 }
 
-// --- 2. 设置电机速度 (DRV8833 逻辑) ---
-// 辅助函数：设置单个电机的PWM
-static void Set_Single_Motor(uint32_t ch_fwd, uint32_t ch_rev, int16_t speed)
-{
-  if (speed > PWM_MAX_SPEED) speed = PWM_MAX_SPEED;
-  if (speed < -PWM_MAX_SPEED) speed = -PWM_MAX_SPEED;
+// ========================================
+// 辅助函数：Set_Single_Motor
+// 功能：控制单个电机的转速和方向
+// 参数：htim_fwd - 前进通道的定时器句柄
+//       ch_fwd   - 前进通道号
+//       htim_rev - 后退通道的定时器句柄
+//       ch_rev   - 后退通道号
+//       speed    - 速度值（-1000到1000）
+//                  正数=前进，负数=后退，0=停止
+// 说明：TB6612驱动芯片有两个输入：IN1和IN2
+//       IN1高IN2低=正转，IN1低IN2高=反转，都低=停止
+// ========================================
+static void Set_Single_Motor(TIM_HandleTypeDef *htim_fwd,
+                             uint32_t ch_fwd, // 前进通道的定时器和通道号
+                             TIM_HandleTypeDef *htim_rev,
+                             uint32_t ch_rev, // 后退通道的定时器和通道号
+                             int16_t speed) {
+  // **限制速度范围，防止超出PWM最大值**
+  if (speed > PWM_MAX_SPEED)
+    speed = PWM_MAX_SPEED; // 不能超过最大速度
+  if (speed < -PWM_MAX_SPEED)
+    speed = -PWM_MAX_SPEED; // 反向也不能超过最大速度
 
   if (speed > 0) {
-    __HAL_TIM_SET_COMPARE(&htim3, ch_fwd, speed);
-    __HAL_TIM_SET_COMPARE(&htim3, ch_rev, 0);
+    // **正数：电机正转（前进）**
+    __HAL_TIM_SET_COMPARE(htim_fwd, ch_fwd,
+                          speed); // 前进通道输出PWM（占空比=speed）
+    __HAL_TIM_SET_COMPARE(htim_rev, ch_rev, 0); // 后退通道输出0（低电平）
   } else if (speed < 0) {
-    __HAL_TIM_SET_COMPARE(&htim3, ch_fwd, 0);
-    __HAL_TIM_SET_COMPARE(&htim3, ch_rev, abs(speed));
+    // **负数：电机反转（后退）**
+    __HAL_TIM_SET_COMPARE(htim_fwd, ch_fwd, 0); // 前进通道输出0（低电平）
+    __HAL_TIM_SET_COMPARE(htim_rev, ch_rev,
+                          abs(speed)); // 后退通道输出PWM（取绝对值）
   } else {
-    __HAL_TIM_SET_COMPARE(&htim3, ch_fwd, 0);
-    __HAL_TIM_SET_COMPARE(&htim3, ch_rev, 0);
+    // **零：电机停止（刹车）**
+    __HAL_TIM_SET_COMPARE(htim_fwd, ch_fwd, 0); // 前进通道输出0
+    __HAL_TIM_SET_COMPARE(htim_rev, ch_rev, 0); // 后退通道输出0
+    // 注意：两个通道都为0时，TB6612会刹车而不是滑行
   }
 }
 
-void Set_Motor_Speed(int16_t left_speed, int16_t right_speed)
-{
-  // 左电机：TIM3 CH1(PA6) / CH2(PA7)
-  Set_Single_Motor(TIM_CHANNEL_1, TIM_CHANNEL_2, left_speed);
-  
-  // 右电机：TIM3 CH3(PB0) / CH4(PB1)
-  Set_Single_Motor(TIM_CHANNEL_3, TIM_CHANNEL_4, right_speed);
+// ========================================
+// 函数名：Set_Motor_Speed
+// 功能：同时设置左右两个电机的速度
+// 参数：left_speed  - 左轮速度（-1000到1000）
+//       right_speed - 右轮速度（-1000到1000）
+// 说明：正数=前进，负数=后退
+//       左右轮速度不同可以实现转弯
+//       例如：左500右300 → 右转弯
+// ========================================
+void Set_Motor_Speed(int16_t left_speed, int16_t right_speed) {
+  // **控制左电机**
+  // 左电机的前进和后退通道都在TIM3上
+  // 前进通道: TIM3_CH1 (PA6)
+  // 后退通道: TIM3_CH2 (PA7)
+  Set_Single_Motor(&htim3, TIM_CHANNEL_1, &htim3, TIM_CHANNEL_2, left_speed);
+
+  // **控制右电机**
+  // 由于PB0引脚损坏，右电机的前进和后退使用了不同的定时器
+  // 前进通道: TIM4_CH3 (PB8) <--- 使用htim4，替代原来损坏的PB0
+  // 后退通道: TIM3_CH4 (PB1) <--- 使用htim3
+  Set_Single_Motor(&htim4, TIM_CHANNEL_3, &htim3, TIM_CHANNEL_4, right_speed);
 }
 
-// --- 3. 读取前端传感器 (A0-A4) ---
-uint8_t Read_Front_Sensors(void)
-{
-  uint8_t sensor_val = 0;
-  // 假设高电平为黑线 (1)，低电平为白底 (0)
-  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) sensor_val |= (1 << 0);
-  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET) sensor_val |= (1 << 1);
-  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2) == GPIO_PIN_SET) sensor_val |= (1 << 2);
-  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_SET) sensor_val |= (1 << 3);
-  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_4) == GPIO_PIN_SET) sensor_val |= (1 << 4);
-  return sensor_val;
+// ========================================
+// 函数名：Read_Front_Sensors
+// 功能：读取前端5路灰度传感器的状态
+// 返回值：5位二进制数（0-31）
+//         每一位代表一个传感器：1=检测到黑线，0=白底
+//         例如：0b00100 = 只有中间传感器检测到黑线
+//               0b11111 = 所有传感器都在黑线上（宽线）
+//               0b00000 = 所有传感器都在白底（丢线）
+// 引脚：PA0-PA4（从右到左，根据实际焊接）
+// ========================================
+uint8_t Read_Front_Sensors(void) {
+  uint8_t sensor_val = 0; // 初始化为0（所有传感器都在白底）
+
+  // 读取5个灰度传感器的状态
+  // 灰度传感器工作原理：检测到黑线输出高电平，白底输出低电平
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
+    sensor_val |= (1 << 0); // PA0 → bit0
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET)
+    sensor_val |= (1 << 1); // PA1 → bit1
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2) == GPIO_PIN_SET)
+    sensor_val |= (1 << 2); // PA2 → bit2
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_3) == GPIO_PIN_SET)
+    sensor_val |= (1 << 3); // PA3 → bit3
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_4) == GPIO_PIN_SET)
+    sensor_val |= (1 << 4); // PA4 → bit4
+
+  return sensor_val; // 返回打包后的5位二进制数
 }
 
-// --- 4. 读取后端传感器 (B3-B7) ---
-uint8_t Read_Rear_Sensors(void)
-{
-  uint8_t sensor_val = 0;
-  // #TODO: 注意：PB3 和 PB4 默认是 JTAG 引脚，需要在 CubeMX 中配置 Debug 为 "Serial Wire" 才能作为普通 GPIO 使用
-  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_3) == GPIO_PIN_SET) sensor_val |= (1 << 0);
-  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_4) == GPIO_PIN_SET) sensor_val |= (1 << 1);
-  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_5) == GPIO_PIN_SET) sensor_val |= (1 << 2);
-  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_6) == GPIO_PIN_SET) sensor_val |= (1 << 3);
-  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7) == GPIO_PIN_SET) sensor_val |= (1 << 4);
-  return sensor_val;
+// ========================================
+// 函数名：Read_Rear_Sensors
+// 功能：读取后端5路灰度传感器的状态
+// 返回值：5位二进制数（0-31），逻辑同前端传感器
+// 引脚：PB3-PB7（从右到左，根据实际焊接）
+// 注意：PB3和PB4默认是JTAG调试引脚！
+//       必须在CubeMX中将Debug设为"Serial Wire"
+//       否则这两个引脚无法作为GPIO使用
+// ========================================
+uint8_t Read_Rear_Sensors(void) {
+  uint8_t sensor_val = 0; // 初始化为0
+
+  // 读取后端5个灰度传感器的状态
+  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_3) == GPIO_PIN_SET)
+    sensor_val |= (1 << 0); // PB3 → bit0
+  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_4) == GPIO_PIN_SET)
+    sensor_val |= (1 << 1); // PB4 → bit1
+  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_5) == GPIO_PIN_SET)
+    sensor_val |= (1 << 2); // PB5 → bit2
+  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_6) == GPIO_PIN_SET)
+    sensor_val |= (1 << 3); // PB6 → bit3
+  if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_7) == GPIO_PIN_SET)
+    sensor_val |= (1 << 4); // PB7 → bit4
+
+  return sensor_val; // 返回打包后的5位二进制数
 }
 
-// --- 5. 计算偏差值 ---
-int16_t Calculate_Deviation(uint8_t sensor_value)
-{
-  // 简单的加权平均法
-  // 权重分配: 左2(-2), 左1(-1), 中(0), 右1(1), 右2(2)
-  // 对应位:   bit4,    bit3,    bit2,  bit1,   bit0 (根据Read函数顺序)
-  
-  // 这里的 bit0 对应 A0/B3，bit4 对应 A4/B7
-  // #TODO: 假设 A0/B3 在最右边，A4/B7 在最左边 (请根据实际焊接调整正负号)
-  
-  float sum_weighted = 0;
-  float sum_active = 0;
-  
-  // 权重定义：最左(bit4) -> -20, 最右(bit0) -> 20
-  // 扩大数值方便 PID 计算
-  int weights[5] = {20, 10, 0, -10, -20}; 
-  
+// ========================================
+// 函数名：Calculate_Deviation
+// 功能：根据传感器读数计算小车偏离黑线的程度
+// 参数：sensor_value - 5位传感器数据（来自Read_Front/Rear_Sensors）
+// 返回值：偏差值（int16_t）
+//         0   = 完全居中（例如0b00100，中间传感器在线上）
+//         正数 = 偏右（需要向左转）
+//         负数 = 偏左（需要向右转）
+// 算法：加权平均法
+//       给每个传感器分配一个权重（位置值）
+//       计算所有检测到黑线的传感器的平均位置
+// ========================================
+int16_t Calculate_Deviation(uint8_t sensor_value) {
+  // **定义传感器位置权重**
+  // 假设传感器从右到左排列：bit0, bit1, bit2, bit3, bit4
+  // 权重：最右(bit0) = +20, 最左(bit4) = -20
+  // 数值扩大20倍，让PID计算更精确
+  int weights[5] = {43, 15, 0, -15, -43};
+  // 如果小车向右偏，左边的传感器会检测到线，产生负偏差，需要向右转
+  // 如果小车向左偏，右边的传感器会检测到线，产生正偏差，需要向左转
+
+  float sum_weighted = 0; // 加权和：所有检测到黑线的传感器的位置总和
+  float sum_active = 0;   // 激活数：有多少个传感器检测到了黑线
+
+  // **遍历5个传感器**
   for (int i = 0; i < 5; i++) {
-    if ((sensor_value >> i) & 0x01) { // 如果第 i 位是 1 (检测到黑线)
-      sum_weighted += weights[i];
-      sum_active++;
+    if ((sensor_value >> i) & 0x01) { // 检查第i位是否为1（是否检测到黑线）
+      sum_weighted += weights[i];     // 累加该传感器的权重
+      sum_active++;                   // 激活计数+1
     }
   }
-  
+
+  // **处理丢线情况**
   if (sum_active == 0) {
-    // 丢失目标：保持上一次的偏差方向，或者返回极大值让其急转
-    // 这里简单返回上一次的偏差
-    return last_error; 
+    // 所有传感器都没检测到黑线（丢线了！）
+    // 保持上一次的偏差方向，继续按照惯性转弯寻找黑线
+    // 这样小车不会突然停止或乱转
+    return last_error;
   }
-  
-  // 计算平均偏差
+
+  // **计算平均偏差**
   int16_t error = (int16_t)(sum_weighted / sum_active);
   return error;
 }
 
-// --- 6. PID 初始化 ---
-void PID_Init(void)
-{
-  last_error = 0;
-  // Kp, Ki, Kd 已经在全局变量定义时初始化
+// ========================================
+// 函数名：PID_Init
+// 功能：初始化PID控制器
+// 说明：清零上一次的偏差值
+//       Kp、Ki、Kd参数已在全局变量中定义
+// ========================================
+void PID_Init(void) {
+  last_error = 0; // 清零上一次偏差，开始时假设小车在正中间
 }
 
-// --- 7. PID 计算 ---
-int16_t PID_Calculate(int16_t deviation)
-{
-  // 1. 计算 P (比例)
+// ========================================
+// 函数名：PID_Calculate
+// 功能：PID控制算法，计算电机速度修正量
+// 参数：deviation - 当前偏差（来自Calculate_Deviation）
+// 返回值：速度修正量（-800到800）
+//         正值：需要向左转（左轮减速或右轮加速）
+//         负值：需要向右转（右轮减速或左轮加速）
+// 算法：output = Kp×偏差 + Kd×偏差变化率
+//       P（比例）：偏差越大，修正越强
+//       D（微分）：偏差变化越快，修正越强（防止震荡）
+//       I（积分）：循迹不需要，已忽略
+// ========================================
+int16_t PID_Calculate(int16_t deviation) {
+  // **1. 计算P项（比例项）**
+  // P项是PID的主要控制力，与当前偏差成正比
+  // 偏差越大，修正力度越大
+  // 例如：deviation=15, Kp=35 → P=525
   float P = deviation * Kp;
-  
-  // 2. 计算 D (微分) - 预测未来趋势
+
+  // **2. 计算D项（微分项）**
+  // D项预测偏差的变化趋势，提前做出反应
+  // 如果偏差快速增大，D项会增强修正（防止冲出去）
+  // 如果偏差快速减小，D项会减弱修正（防止过冲震荡）
+  // 例如：上次偏差10，这次15，变化率=5 → D=5×20=100
   float D = (deviation - last_error) * Kd;
-  
-  // 更新 last_error
+
+  // **3. 更新上一次偏差**
+  // 保存当前偏差，供下次计算D项使用
   last_error = deviation;
-  
-  // 3. 计算总输出 (忽略 I 积分项，循迹一般不需要)
+
+  // **4. 计算总输出（忽略I积分项）**
+  // 循迹通常不需要I项，因为：
+  // - 循迹是瞬时控制，不需要消除长期累积误差
+  // - I项容易引起震荡和超调
   int16_t output = (int16_t)(P + D);
-  
-  // 限制最大修正量，防止电机反转过快
+
+  // **5. 限制最大修正量**
+  // 防止修正量过大导致电机速度突变或反转
+  // 限制在±800，给基础速度留出余量
   if (output > 800) output = 800;
   if (output < -800) output = -800;
-  
-  return output;
+
+  return output; // 返回修正量，用于调整左右轮速度差
 }
 
 /* USER CODE END 4 */
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
-void Error_Handler(void)
-{
+ * @brief  错误处理函数
+ * @note   当系统发生严重错误时会调用此函数
+ *         例如：时钟配置失败、外设初始化失败等
+ * @retval None（此函数不会返回，会一直停在这里）
+ */
+void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
+  /* 用户可以在这里添加自己的错误处理代码，例如：
+     - 点亮错误指示灯
+     - 发送错误信息到串口
+     - 记录错误日志等 */
+
+  __disable_irq(); // 禁用所有中断（防止进一步的错误）
+  while (1)        // 死循环：程序停在这里，等待复位
   {
+    // 可以在这里添加LED闪烁等错误指示
   }
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
-void assert_failed(uint8_t *file, uint32_t line)
-{
+ * @brief  断言失败处理函数
+ * @note   当代码中的assert_param宏检测到参数错误时会调用此函数
+ *         这是一个调试工具，用于在开发阶段发现代码错误
+ * @param  file: 发生错误的源文件名
+ * @param  line: 发生错误的行号
+ * @retval None
+ */
+void assert_failed(uint8_t *file, uint32_t line) {
   /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* 用户可以在这里添加自己的断言错误处理代码
+     例如：通过串口打印错误信息
+     printf("参数错误: 文件 %s 第 %d 行\r\n", file, line); */
+
+  // 注意：此功能仅在定义了USE_FULL_ASSERT时启用
+  // 发布版本通常会关闭此功能以节省代码空间
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
